@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 
-"""Create a JACK client that copies input audio directly to the outputs.
-
-This is somewhat modeled after the "thru_client.c" example of JACK 2:
-http://github.com/jackaudio/jack2/blob/master/example-clients/thru_client.c
-
-If you have a microphone and loudspeakers connected, this might cause an
-acoustical feedback!
-
-"""
 import sys
 import os
 import jack
@@ -36,7 +27,10 @@ per_len = 4096
 yam_len = 15600
 
 target=np.zeros((1,yam_len)) # not sure if this should be (1,..) or (0,...)
+target0=np.zeros((1,yam_len)) # 
+target1=np.zeros((1,yam_len)) #
 cur_index = 0
+target_count = 0
 
 @client.set_process_callback
 def process(frames):
@@ -45,6 +39,8 @@ def process(frames):
 
     datain = client.inports[0].get_array()
     qin.put(datain)
+    c = time.time()
+    #print("Time after qin.put(): ",c)
     data = qout.get_nowait()
     client.outports[0].get_array()[:] = data
 
@@ -56,6 +52,10 @@ def shutdown(status, reason):
     print('status:', status)
     print('reason:', reason)
     event.set()
+
+def measure(buff):
+   rms = np.sqrt(np.mean(buff**2))
+   return rms
 
 qout = queue.Queue(maxsize=2)
 qin = queue.Queue(maxsize=2)
@@ -84,39 +84,43 @@ with client:
         raise RuntimeError('No physical capture ports')
 
 
-    client.connect('system:capture_1', 'concat:input_1')
+    client.connect('system:capture_1', 'yamnet:input_1')
 
     playback = client.get_ports(is_physical=True, is_input=True)
     if not playback:
         raise RuntimeError('No physical playback ports')
 
 
-    client.connect('concat:output_1', 'system:playback_1')
+    client.connect('yamnet:output_1', 'system:playback_1')
 
   
     print('Press Ctrl+C to stop')
     try:
         while True:
             noisy = qin.get()
-            #print("noisy: dim=",noisy.ndim," shape=",noisy.shape," size=",noisy.size)
+            c = time.time()
+            #print("cur_index: ",cur_index)
             if cur_index < yam_len:
                a = yam_len - cur_index
                if a > per_len:
                   b = cur_index + per_len 
                   target[0][cur_index:b] = noisy                
                   cur_index = b 
-                  print("cur_index: ",cur_index)
                else:
                   target[0][cur_index:cur_index+a] = noisy[0:a]
-                  print("Filled another one!!!")
+                  #print("Filled another one!!!")
                   cur_index=0
-
+                  rms = measure(target)
+                  print("rms:  ", rms)
+                     
             qout.put(noisy)
-            #event.wait(timeout=3)
             
     except KeyboardInterrupt:
         print('\nInterrupted by user')
 
+print("After interrupt")
+
+   
 # When the above with-statement is left (either because the end of the
 # code block is reached, or because an exception was raised inside),
 # client.deactivate() and client.close() are called automatically.
