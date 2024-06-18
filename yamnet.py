@@ -7,6 +7,7 @@ import threading
 import queue
 import numpy as np
 import time
+import tflite_runtime.interpreter as tflite 
 
 argv = iter(sys.argv)
 # By default, use script name without extension as client name:
@@ -14,6 +15,7 @@ defaultclientname = os.path.splitext(os.path.basename(next(argv)))[0]
 clientname = next(argv, defaultclientname)
 servername = next(argv, None)
 
+# jackd needs to be running with fs=16000, period=4096
 client = jack.Client(clientname, servername=servername)
 
 if client.status.server_started:
@@ -26,11 +28,29 @@ event = threading.Event()
 per_len = 4096
 yam_len = 15600
 
-target=np.zeros((1,yam_len)) # not sure if this should be (1,..) or (0,...)
-target0=np.zeros((1,yam_len)) # 
-target1=np.zeros((1,yam_len)) #
+target=np.zeros((yam_len,),dtype="float32") # 
 cur_index = 0
 target_count = 0
+
+#model_path = 'yamnet.tflite'
+model_path = '1.tflite'
+interpreter = tflite.Interpreter(model_path)
+input_details = interpreter.get_input_details()
+waveform_input_index = input_details[0]['index']
+output_details = interpreter.get_output_details()
+scores_output_index = output_details[0]['index']
+
+f = open("yamnet_class_map.csv","r")
+labels = [x for x in f.readlines()]
+for i in range(len(labels)):
+   input_string = labels[i][:-1]
+   parts = input_string.split(',')
+   output_string = ','.join(parts[2:])
+   labels[i]=output_string.upper()
+
+
+interpreter.resize_tensor_input(waveform_input_index, [yam_len], strict=True)
+interpreter.allocate_tensors()
 
 @client.set_process_callback
 def process(frames):
@@ -40,7 +60,6 @@ def process(frames):
     datain = client.inports[0].get_array()
     qin.put(datain)
     c = time.time()
-    #print("Time after qin.put(): ",c)
     data = qout.get_nowait()
     client.outports[0].get_array()[:] = data
 
@@ -99,20 +118,24 @@ with client:
         while True:
             noisy = qin.get()
             c = time.time()
-            #print("cur_index: ",cur_index)
             if cur_index < yam_len:
                a = yam_len - cur_index
                if a > per_len:
                   b = cur_index + per_len 
-                  target[0][cur_index:b] = noisy                
+                  target[cur_index:b] = noisy                
                   cur_index = b 
                else:
-                  target[0][cur_index:cur_index+a] = noisy[0:a]
-                  #print("Filled another one!!!")
+                  target[cur_index:cur_index+a] = noisy[0:a]
                   cur_index=0
-                  rms = measure(target)
-                  print("rms:  ", rms)
-                     
+                  interpreter.set_tensor(waveform_input_index, target)
+                  interpreter.invoke()
+                  scores = interpreter.get_tensor(scores_output_index)
+                  label_index = np.argsort(scores,axis=1)
+                  li = label_index[0][::-1][0:4]
+                  print(labels[li[0]+ 1],":", "%.2f"%scores[0][li[0]])
+                  print("\t", labels[li[1]+1],":","%.2f"%scores[0][li[1]],"\n\t\t",labels[li[2]+1],"%.2f"%scores[0][li[2]],"\n")
+
+                                       
             qout.put(noisy)
             
     except KeyboardInterrupt:
